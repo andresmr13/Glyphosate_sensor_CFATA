@@ -1,0 +1,23 @@
+name: gly_models
+channels:
+  - conda-forge
+dependencies:
+  # Python Version
+  - python=3.11
+
+  # Core Data Science & ML Libraries
+  - pandas
+  - numpy
+  - scikit-learn
+  - plotly
+
+  # TensorFlow for Apple Silicon (this will pull in the necessary dependencies)
+  - tensorflow
+
+  # Visualization
+  - matplotlib
+  
+  # Pip for packages not on Conda
+  # - pip
+  # - pip:
+  #   - everywhereml>=0.2.12
