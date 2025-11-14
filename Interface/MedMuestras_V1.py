@@ -18,11 +18,16 @@ import csv
 #from datetime import datetime
 from PIL import ImageGrab
 from PIL import Image, ImageTk
+import sys
 
 # Constantes para la proporción de la ventana
 BASE_WIDTH = 1200
 BASE_HEIGHT = 900
 ASPECT_RATIO = BASE_WIDTH / BASE_HEIGHT
+
+# global is_measurement_busy
+
+is_measurement_busy = False
 
 # Declaraciones globales
 ser = serial.Serial()
@@ -292,58 +297,96 @@ def guardado():
     print(datosMed)
     GuardaDato(datosMed)
 
+    # --- AÑADIDO ---
+    # 3. Rehabilita el botón cuando la medición termina.
+    print("Medición finalizada.")
+    botonDE.config(state="normal")
+    # (Opcional: podrías actualizar una etiqueta de "Midiendo..." a "Listo")
+
 # ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 # /// CICLO DE MEDICION DISPERSION Y EMISION
 # ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-def MedDE():
-    global DisResults
-    global EmiResults
+# def MedDE():
+def _MedDE_execute():
+    global DisResults, EmiResults, is_measurement_busy
+    
+    try:
+        # Manda comando para medir Glifosato
+        ser.flushInput()
+        ser.write(b'SCAN\n')
 
-    # Manda comando para medir Glifosato
-    ser.flushInput()
-    ser.write(b'SCAN\n')
+        # Primera linea es el acknoledge
+        recibe = ser.readline()
+        print(recibe)
+    
+        # La segunda linea son los valores de dispersion
+        recibe = ser.readline()
+        input_string = recibe
+        values_str = input_string.decode('utf-8').split(',')
+        values_float = [float(value) for value in values_str if value.strip()]
+        result_array = np.array(values_float)
+        DisResults = result_array
+        mediD = result_array
 
-    # Primera linea es el acknoledge
-    recibe = ser.readline()
-    print(recibe)
-  
-    # La segunda linea son los valores de dispersion
-    recibe = ser.readline()
-    input_string = recibe
-    values_str = input_string.decode('utf-8').split(',')
-    values_float = [float(value) for value in values_str if value.strip()]
-    result_array = np.array(values_float)
-    DisResults = result_array
-    mediD = result_array
+        # La tercera linea son los valores de emision
+        recibe = ser.readline()
+        input_string = recibe
+        values_str = input_string.decode('utf-8').split(',')
+        values_float = [float(value) for value in values_str if value.strip()]
+        result_array = np.array(values_float)
+        EmiResults = result_array
+        mediE = result_array
 
-    # La tercera linea son los valores de emision
-    recibe = ser.readline()
-    input_string = recibe
-    values_str = input_string.decode('utf-8').split(',')
-    values_float = [float(value) for value in values_str if value.strip()]
-    result_array = np.array(values_float)
-    EmiResults = result_array
-    mediE = result_array
+        # Grafica datos
+        grafDE(mediD, mediE)
 
-    # Grafica datos
-    grafDE(mediD, mediE)
+        # Guarda datos
+        guardado()
 
-    # Guarda datos
-    guardado()
+        # Recibe resultado de medicion en instrumento
+        recibe = ser.readline()
+        print(recibe)
+        recibe = ser.readline()
+        print(recibe)
+        #recibe=ser.readline()
+        #print(recibe)
 
-    # Recibe resultado de medicion en instrumento
-    recibe = ser.readline()
-    print(recibe)
-    recibe = ser.readline()
-    print(recibe)
-    #recibe=ser.readline()
-    #print(recibe)
+    except Exception as e:
+        # Es una buena práctica registrar cualquier error
+        print(f"Error durante la medición MedDE: {e}")
 
+    finally:
+        # --- AÑADIDO ---
+        # 2. Libera el candado, sin importar si la medición
+        #    tuvo éxito o falló.
+        is_measurement_busy = False
+        
 # ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 # //// FUNCIONES DE BOTONES DE CONTROL (LEDs, Laser, Batería)
 # ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 # ... (justo después de VBAT_POLL_RATE_MS) ...
+# 1. Esta es la NUEVA función MedDE que tu botón llama.
 
+def MedDE():
+    # --- AÑADIDO ---
+    global is_measurement_busy 
+    # --- FIN ---
+
+    print("Iniciando retraso de 15 segundos...")
+    
+    # --- CORRECCIÓN ---
+    # 1. Poner el candado AHORA, al inicio del retraso.
+    is_measurement_busy = True 
+
+    # --- FIN ---
+    # --- AÑADIDO ---
+    # Deshabilita el botón "Medir D/E" para evitar clics múltiples
+    botonDE.config(state="disabled")
+    
+    # (Opcional: aquí podrías poner una etiqueta que diga "Midiendo en 15s...")
+
+    # Programa la ejecución de _MedDE_execute después de 15000 ms (15 seg)
+    root.after(15000, _MedDE_execute)
 
 
 def on_resize(event):
@@ -421,8 +464,9 @@ def midvbat():
 
 def poll_vbat_loop():
     """Función que se llama periódicamente para medir la batería."""
-    if ser.is_open: # Solo medir si está conectado
-        midvbat()
+    if ser.is_open and not is_measurement_busy: 
+        # --- FIN DE LA MODIFICACIÓN ---
+            midvbat()
     
     # Reprogramar la próxima ejecución
     root.after(VBAT_POLL_RATE_MS, poll_vbat_loop)
@@ -530,6 +574,19 @@ root = tk.Tk()
 root.title("Control de equipo sensor Glifosato")
 # Ajusta el tamaño y lo deja fijo 
 root.geometry("1200x800")
+
+try:
+    # Check the operating system
+    if 'darwin' in sys.platform:
+        # MAC: Requires a .icns file
+        # Make sure 'my_icon.icns' is in the same folder
+        root.iconbitmap("icon.icns") 
+    else:
+        # WINDOWS: Requires a .ico file
+        root.iconbitmap("icon.ico")
+        
+except Exception as e:
+    print(f"No se pudo cargar el icono: {e}")
 
 # --- AÑADIR ESTAS LÍNEAS ---
 #
