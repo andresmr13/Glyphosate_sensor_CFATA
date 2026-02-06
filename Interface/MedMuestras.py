@@ -665,19 +665,19 @@ botLasoff.place(x=500, y=700)
 
 #Desplienga en la GUI logos: UNAM, CFATA Y CONACYT
 # Carga las imagenes
-orimage1 = Image.open("LogoCFATA.png")  
-width, height = 200, 100  # Set the desired width and height for the resized image
-image1 = orimage1.resize((width, height))
-photo1 = ImageTk.PhotoImage(image1)
-portalogo1 = tk.Label(root, image=photo1)
-portalogo1.place(x=250,y=780)
+# orimage1 = Image.open("LogoCFATA.png")  
+# width, height = 200, 100  # Set the desired width and height for the resized image
+# image1 = orimage1.resize((width, height))
+# photo1 = ImageTk.PhotoImage(image1)
+# portalogo1 = tk.Label(root, image=photo1)
+# portalogo1.place(x=250,y=780)
 
-orimage2 = Image.open("Secihti_logo.png")  
-width, height = 100, 100  # Set the desired width and height for the resized image
-image2 = orimage2.resize((width, height))
-photo2 = ImageTk.PhotoImage(image2)
-portalogo2 = tk.Label(root, image=photo2)
-portalogo2.place(x=470,y=780)
+# orimage2 = Image.open("Secihti_logo.png")  
+# width, height = 100, 100  # Set the desired width and height for the resized image
+# image2 = orimage2.resize((width, height))
+# photo2 = ImageTk.PhotoImage(image2)
+# portalogo2 = tk.Label(root, image=photo2)
+# portalogo2.place(x=470,y=780)
 
 
 

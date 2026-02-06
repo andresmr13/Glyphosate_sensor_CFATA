@@ -1,62 +1,333 @@
-# Programa Control V6,
-# Programa para tomar datos de entrenamiento de redesd neuronales
-# Se integra proceso de medicion de luz dispersada y luz emitida.
+# Programa para Interfaz gráfica con ESP32 corriendo rutina de medición y predicción de glifosato.
+# Se integra proceso de medicion de dispersión de luz blanca (LED) y luz emitida (con exitación IR).
 # Se homologa para que sea exactamente la misma metodologia para medir datos de entrenamiento y medicion molecular
 # Elaborado por Alejandro Gimenez, 20 Julio 2024
-# Esta version recibe datos seleccionados (100) para tener mejor resolucion y tener una red neuronal de tamañol viable para ESP32.
+# Esta version recibe datos seleccionados (100).
 
+# El código ha sido modificado por Andres Montes de Oca a partir de Oct, 2025.
+# Se incorporan botones para el control manual del LED y el laser. También se incluye un botón para realizar la conexión
+# y una leyenda que muestra el estado de conexión.
+# Se agregó un temporizador al botón de mediciones (aprox. 15 s).
+# También se muestra el nivel de batería que se actualiza cada vez que se toma una medición
 
-# Importa dependencias
+# Modulos
 import serial
 import numpy as np
 import matplotlib.pyplot as plt
-#import time
 import tkinter as tk
-#from tkinter import messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import csv
-#from datetime import datetime
 from PIL import ImageGrab
 from PIL import Image, ImageTk
-import sys
 
-# Constantes para la proporción de la ventana
-BASE_WIDTH = 1200
-BASE_HEIGHT = 900
-ASPECT_RATIO = BASE_WIDTH / BASE_HEIGHT
-
-# global is_measurement_busy
-
-is_measurement_busy = False
-
-# Declaraciones globales
 ser = serial.Serial()
 ser.baudrate = 115200
-#ser.port = 'COM3' #Cambiar dependiendo del puerto usado 
-ser.port = '/dev/cu.usbserial-0001' # Este es el puerto en mi mac @Andres.                         
+#ser.port = 'COM3' # Usualmente se detecta como un COM en PCs
+ser.port = '/dev/cu.usbserial-0001' # Este es el puerto en mi mac @Andres.                     
 
 conectado = False # Esta variable nos dice si esta conectado o no
+medicion_en_progreso = False # Semáforo para evitar colisiones en el puerto serial
 limploty = 300 # Limite de grafica en intensidad
 
-# Variables para guardar los valores de Tint, Gan y Temp
+# Variable para monitorear el widget actual y asi poder borrarlo antes de dibujar uno nuevo
+current_canvas_widget = None
+
+# Variables para guardar los valores de Tint (tiempo de integración), Gan (ganancia) y Temp (temperatura)
+# Iniciales
 EstTint = 700
 EstGan = 16
 EstTemp = 20.00
 EstVolt = 7.2           
 
-# Arreglo de datos Dispersion
+# Arreglo de datos para guardar dispersión y emisión
 DisResults = np.zeros(288, dtype=int)
 EmiResults = np.zeros(288, dtype=int)
 
-# Tasa de sondeo para la batería (en milisegundos)
-# n segundos = n * 1000
-VBAT_POLL_RATE_MS = 10000 # 10 segundos
+# función para recibir datos por serial
+def parse_serial_data(raw_bytes, expected_length=50):
+    """
+    Decodifica bytes en el puerto serial de manera segura, ignora basura (\xff), 
+    y asegura que el arreglo de salida coincida con la dimensión del eje X.
+    """
+    try:
+        text_data = raw_bytes.decode('utf-8', errors='ignore')
+        # Limpia espacios en blanco
+        text_data = text_data.strip()
+        
+        # Se filtran caracteres validos: digitos, comas, puntos, signo negativo)
+        clean_chars = [c for c in text_data if c in "0123456789.-,"]
+        clean_text = "".join(clean_chars)
+        
+        # Se separan los datos
+        values_str = clean_text.split(',')
+        values_float = []
+        for v in values_str:
+            try:
+                if v: # check if not empty
+                    values_float.append(float(v))
+            except ValueError:
+                continue
+
+        # Se forza el tamaño del arreglo a 50
+        y_array = np.array(values_float)
+        
+        if len(y_array) != expected_length:
+            print(f"T_MSG: Warning - Received {len(y_array)} points, expected {expected_length}. Resizing...")
+            current_x = np.linspace(0, 1, len(y_array))
+            target_x = np.linspace(0, 1, expected_length)
+            y_array = np.interp(target_x, current_x, y_array)
+
+        return y_array
+
+    except Exception as e:
+        print(f"T_MSG: Error parsing data: {e}")
+        # Regresa un arreglo de ceros para evitar error
+        return np.zeros(expected_length)
+
+# Función para conectarse con el ESP32   
+def conectar():
+    """
+    Rutina para establecer conexión con el sensor.
+    """
+    # Verificación del puerto serial
+    if not ser.is_open:
+        try:
+            ser.open()
+        except serial.SerialException as e:
+            print(f"T_MSG: Error al abrir puerto serial: {e}")
+            return
+
+
+    ser.reset_input_buffer()
+    ser.flushInput()
+    print("T_MSG: Intentando conectar...")
+
+    success = False
+
+    ser.write(b'CHCON\n') # Comando para establecer conexión 'CHCON\n'
+
+    # Se lee el puerto serial 3 veces. El tercer mensaje es el de conexión exitosa.
+    # 1. La primera lectura corresponde al ACK que es el retorno del comando.
+    # 2. La segunda lectura es un espacio en blanco (hay que verificar)
+    # 3. La tercera lectura es el string 'CONOK\n'
+    for i in range(3):
+        
+        # Espera de 1 seg
+        ser.timeout = 1 
+        recibe = ser.readline().decode('utf-8', errors='ignore')
+        print(f'T_MSG: lectura n. {i+1}')
+        print(f'S_MSG: {recibe}')
+        
+        if "CONOK" in recibe: # Se verifica string de conexión exitosa enviado por el ESP32 ('CONOK\n')
+            success = True
+            break
+    
+    if success:
+        # Se indica por la terminal que se logró la conexión
+        print("T_MSG: Conectado")
+        # Se indica el estado de conexión en el GUI
+        botCon.configure(bg="red", fg="white") 
+        labConStatus.config(text="Conectado", fg="green")
+        botCon.config(state="disabled")
+        # Se habilitan los botones de control para el sensor
+        botLdon.config(state="normal")
+        botLason.config(state="normal")
+        botonDE.config(state="normal")
+        botonSaveSpec.config(state="normal") 
+        botonSaveIm.config(state="normal") 
+        botVbat.config(state="normal")
+        botATI.config(state="normal")
+        
+        # Config. inicial para ajustar tiempo de integración y medir por primera vez la bateria.
+        ajutint()
+        monitoreo_automatico_vbat()
+
+    else:
+        print("T_MSG: No se recibió respuesta del sensor")
+        # Se indica fallo de conexión
+        labConStatus.config(text="Fallo Conexión", fg="orange")
+        ser.close()
+
+# Función para ajuste de tiempo de integración
+def ajutint():
+    """
+    Ajuste de tiempo de integración del espectrometro de acuerdo al textbox del GUI.
+    """
+    ser.flushInput()
+    # se toma el valor de tiempo de int. en la interfaz y se arma mensaje
+    vti = tbati.get('1.0', tk.END)
+    vtid3 = int(int(vti))
+    strparati = "AjHTI" + str(vtid3) + "\n"
+    bobj = bytes(strparati, 'utf-8')
+    # se envia mensaje al ESP32 y se muestra en la terminal
+    ser.write(bobj)
+    print('T_MSG:',strparati)
+    # Se lee la confirmación del ESP32
+    recibe = ser.readline().decode('utf-8', errors='ignore') # Este primer string creo que es un espacio en blanco
+    recibe = ser.readline().decode('utf-8', errors='ignore') # Este string es la confirmacio2n del comando 'AjHTI'+Tint+'\n'
+    print('S_MSG:',recibe)
+    # Se guarda el dato de tiempo de integración
+    global EstTint
+    EstTint = int(vti)
+
+#  Función que ejecuta la función de medición despues de 15 segundos
+def MedDE():
+    """
+    Inicia temporizador antes de hacer medición. Esto automatiza la toma de mediciones
+    para evitar hacer conteo manual de los 15 segundos.
+    """
+    global medicion_en_progreso
+    medicion_en_progreso = True # Se bloquea el puerto para otras funciones
+
+    print("T_MSG: Inicia retraso de 15 seg. antes de comenzar la medición...")
+    # Deshabilita el botón "Medir D/E" para evitar clics múltiples
+    botonDE.config(state="disabled")
+
+    # Programa la ejecución de _MedDE_execute después de 15000 ms (15 seg)
+    root.after(15000, _MedDE_execute)
+
+# Función para realizar mediciones. Llama graficas y guardado de datos
+def _MedDE_execute():
+    """
+    Envío de comando SCAN para medición. Se lee la respuesta del sensor.
+    La respuesta se lee en 5 readline()
+    """
+    global DisResults, EmiResults, medicion_en_progreso
+    
+    try:
+        ser.reset_input_buffer()
+        ser.write(b'SCAN\n')
+
+        # Espera para realizar la captura 
+        ser.timeout = 5  
+        
+        # Los datos se leen en el siguiente orden:
+        # 1. ACK
+        # 2. Dispersion Data
+        # 3. Emission Data
+        # 4. Vbat
+        # 5. Prediction (ppm)
+
+        # Se verifica confirmación del comando de medición (SCAN)
+        recibe_d = ser.readline()
+        if recibe_d == b'SCAN\n':
+            print("T_MSG: Medición en curso...")
+
+        # Dispersion
+        recibe_d = ser.readline()
+        DisResults = parse_serial_data(recibe_d, expected_length=50)
+
+        # Emision
+        recibe_e = ser.readline()
+        EmiResults = parse_serial_data(recibe_e, expected_length=50)
+        
+        # Voltaje
+        recibe_vbat = ser.readline()
+        volt_str = recibe_vbat.decode('utf-8', errors='ignore').strip()
+
+        if volt_str: 
+            try:
+                global EstVolt
+                EstVolt = float(volt_str)
+                if EstVolt < 7.3:
+                    bat_color = 'red'
+                else:
+                    bat_color = 'green'
+                labVbat.config(text=f"{EstVolt:.2f} V", fg=bat_color)
+            except ValueError:
+                 labVbat.config(text="Err", fg="orange")
+        else:
+            labVbat.config(text="---") 
+        print(f"S_MSG: voltaje, {recibe_vbat}")
+
+        # Predicción
+        recibe_ppm = ser.readline()
+        print(f"S_MSG: predicción, {recibe_ppm}")
+
+        ser.timeout = 1
+        # Se grafican los resultados de la medición 
+        grafDE(DisResults, EmiResults)
+        guardado()
+        
+    except Exception as e:
+        print(f"T_MSG: Error, {e}")
+    finally:
+        botonDE.config(state="normal")
+        medicion_en_progreso = False # Liberamos el puerto
+
+# Función para graficar curvas de dispersión y emisión despues de una medición
+def grafDE(valoresD, valoresE):
+    """
+    Genera las graficas para visualizar en el GUI.
+    """
+    global current_canvas_widget
+
+    # Se limpian figuras previas para reducir uso de memoria
+    plt.close('all') 
+    if current_canvas_widget is not None:
+        current_canvas_widget.destroy()
+
+    # Tablas de longitudes de onda y etiquetas
+    longs = np.linspace(340, 850, 50) 
+    colorbars = np.array([wavelength_to_rgb(w) for w in longs])
+
+    # Se crea una figura con dos subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Plot 1 dispersión
+    if len(valoresD) == 50: 
+        #valoresD = parse_serial_data(str(valoresD).encode(), 50)
+        intmaxsenD = valoresD.max()
+        ax1.scatter(longs, valoresD, color=colorbars, s=20)
+        ax1.set_ylabel('Intensidad')
+        ax1.set_xlabel('Longitud de onda [nm]')
+        ax1.set_title('Espectro de Dispersión')
+        ax1.set_ylim(0, intmaxsenD * 1.2 if intmaxsenD > 0 else 10)
+        ax1.tick_params(axis='both', which='major', labelsize=8)
+
+    # Plot 2 Emisión
+    if len(valoresE) == 50: 
+        #valoresE = parse_serial_data(str(valoresE).encode(), 50)
+        intmaxsenE = valoresE.max()
+        ax2.scatter(longs, valoresE, color=colorbars, s=20)
+        ax2.set_xlabel('Longitud de onda [nm]')
+        ax2.set_title('Espectro de Emisión')
+        ax2.set_ylim(0, intmaxsenE * 1.2 if intmaxsenE > 0 else 10)
+        ax2.tick_params(axis='both', which='major', labelsize=8)
+
+    plt.tight_layout() 
+
+    canvas = FigureCanvasTkAgg(fig, master=root)
+    current_canvas_widget = canvas.get_tk_widget() # Save reference
+    current_canvas_widget.place(x=0, y=40)
+    canvas.draw()
+
+# Función para guardar datos (Parece que esta es redundante, incluir en GuardaDatos())
+def guardado():
+    """
+    Función que llama la rutina de guardado de los datos de una medición
+    """
+    nombremed = tbNombre.get("1.0", "end-1c")
+    concmed = tbConc.get("1.0", "end-1c")
+
+    datosMed = [nombremed, concmed, "---"]
+    datosMed.extend(DisResults)
+    datosMed.extend("-")
+    datosMed.extend(EmiResults)
+
+    GuardaDato(datosMed)
+
+    # Se rehabilita el botón cuando la medición termina.
+    print("'T_MSG: Medición finalizada.")
+    botonDE.config(state="normal")
 
 # Funcion para guardar datos de las mediciones
 def GuardaDato(datos):
-    # Define the file path
-    file_path = 'datosDisEmi.csv'
-    # Check if the file already exists
+    """
+    Se guardan los datos obtenidos de la medición en un archivo csv.
+    """
+    # Ruta del archivo
+    file_path = '/Users/andresmr/Documents/Glyphosate_sensor_CFATA/samples/datosDisEmi.csv'
     file_exists = False
     try:
         with open(file_path, 'r') as file:
@@ -64,118 +335,165 @@ def GuardaDato(datos):
     except FileNotFoundError:
         pass
 
-    # Append data to the CSV file
+    # Se abre el archivo y se agregan los datos
     with open(file_path, 'a', newline='') as file:
         writer = csv.writer(file)
-        # Write data rows
         writer.writerow(datos)
 
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-def conectar():
-    # Inicio de comunicacion////////////////////////////////////////////////////////////////////////////////////////////////////
-    print(ser)
-    print(ser.is_open)
-
-    if (ser.is_open == False):
-        ser.open()
-
-    #ser.flushInput()
-    recibe = ""
-    while (recibe != b'CONOK\r\n'):
+# función para medir voltaje de batería
+def midvbat():
+    """Envío de comando para lectura de voltaje de bateria. También obtiene respueta del sensor y muestra el valor."""
+    if not ser.is_open:
+        labVbat.config(text="N/C") 
+        return
+    try:
+        # Se limpia el buffer
+        ser.reset_input_buffer()
         ser.flushInput()
-        ser.write(b'CHCON\n')
-        recibe = ser.readline()
-        print(recibe)
-        recibe = ser.readline()
-        print(recibe)
+        # Se manda comando de voltaje
+        ser.write(b'MBAT\n')
 
-    print("Conectado")
-    botCon.configure(bg="red", fg="white") 
-    # Ahora esta línea solo actualiza el texto y color de la *segunda* etiqueta
-    labConStatus.config(text="Conectado", fg="green")
+        recibe_val = ser.readline() # Este string es la confirmación del ESP32 (MBAT)
+        recibe_val = ser.readline() # Este string debería ser un espacio en blanco (falta revisar)
+        recibe_val = ser.readline() # Este string es el voltaje de la bateria.
 
-    botCon.config(state="disabled")
-    botLdon.config(state="normal")
-    botLason.config(state="normal")
-    botonDE.config(state="normal")
-    botonSaveSpec.config(state="normal") 
-    botonSaveIm.config(state="normal") 
-    botVbat.config(state="normal")
-    botATI.config(state="normal")
+        if not recibe_val:
+            print("T_MSG: TimeOut en midvbat - El sensor no respondió.")
+            labVbat.config(text="T/O", fg="orange") # Timeout
+            return
+        
+        # Se indica el último string que se recibió
+        print(f"S_MSG: voltaje, {recibe_val}")
+        # Se decodifica el voltaje en el mensaje recibido del ESP32
+        volt_str = recibe_val.decode('utf-8', errors='ignore').strip()
+        if volt_str: 
+            try:
+                global EstVolt
+                EstVolt = float(volt_str)
+                if EstVolt < 7.3:
+                    bat_color = 'red'
+                else:
+                    bat_color = 'green'
+                labVbat.config(text=f"{EstVolt:.2f} V", fg=bat_color)
+            except ValueError:
+                 labVbat.config(text="Err", fg="orange")
+        else:
+            labVbat.config(text="---") 
+    except Exception as e:
+        print(f"T_MSG: Error al medir voltaje, {e}")
+        labVbat.config(text="Err")
 
-    # Configura alto tiempo de integracion y ganancia
-    ajutint()
+# Funcion para checado de voltaje recurrente
+def monitoreo_automatico_vbat():
+    """Ejecuta midvbat() cada 15 segundos si el puerto está libre."""
+    global medicion_en_progreso
     
-    # Inicia el sondeo automático de la batería
-    poll_vbat_loop()
+    # Solo si está conectado y NO hay una medición SCAN o ajuste en curso
+    if ser.is_open and not medicion_en_progreso:
+        print("T_MSG: Ejecutando monitoreo automático de batería...")
+        midvbat()
+    
+    # Se programa a sí misma para dentro de 15 segundos
+    # Puedes ajustar el tiempo aquí
+    root.after(15000, monitoreo_automatico_vbat)
 
-# Ajuste de tiempo de integracion
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-def ajutint():
+# Funciones para encender y apagar el LED
+def DisLedOn():
     ser.flushInput()
-    #strparaati="AjTiIn"
-    vti = tbati.get('1.0', tk.END)
-    vtid3 = int(int(vti))
-    strparati = "AjHTI" + str(vtid3) + "\n"
-    bobj = bytes(strparati, 'utf-8')
-    ser.write(bobj)
-    #recibe=ser.readline()
-    print(strparati)
-    # Para guardar dato de tiempo de integracion
-    global EstTint
-    EstTint = int(vti)
+    # Envío de comando para encender el LED
+    ser.write(b'DISLEDON\n')
+    recibe = ser.readline()
+    #print('S_MSG:',recibe)
+    labLEDStatus.config(text="ON", fg="green")
+    botLdon.config(state="disabled")
+    botLdoff.config(state="normal")
 
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+def DisLedOff():
+    ser.flushInput()
+    # Envío de comando para apagar el LED
+    ser.write(b'DISLEDOFF\n')
+    recibe = ser.readline()
+    #print('S_MSG:',recibe)
+    labLEDStatus.config(text="OFF", fg="red")
+    botLdoff.config(state="disabled")
+    botLdon.config(state="normal")
+
+# Funciones para encender y apagar el laser (a 750mA)
+def LasOn():
+    ser.flushInput()
+    # Envío de comando para encender el laser
+    ser.write(b'LasOn\n')
+    recibe = ser.readline()
+    #print('S_MSG:',recibe)
+    labLaserStatus.config(text="ON", fg="green")
+    botLason.config(state="disabled")
+    botLasoff.config(state="normal")
+
+def LasOff():
+    ser.flushInput()
+    # Envío de comando para apagar el laser
+    ser.write(b'LasOff\n')
+    recibe = ser.readline()
+    #print('S_MSG:',recibe)
+    labLaserStatus.config(text="OFF", fg="red")
+    botLasoff.config(state="disabled")
+    botLason.config(state="normal")
+
+# Función para cerrar el puerto y el programa
+def alcerrar():
+    ser.close()
+    # Pone parametros en default
+    root.destroy()
+
+# Revisar esta función 
 def med_espect(esopt):
-    # Crea lista con longitudes desde 340 a 850
-    longs = np.linspace(340, 850, 50)    #288
-    bar_labels = np.linspace(340, 850, 50)  #288
+    # Se crea lista con longitudes desde 340 a 850
+    longs = np.linspace(340, 850, 50)    
+    bar_labels = np.linspace(340, 850, 50)  
     colorbars = np.array([wavelength_to_rgb(w) for w in longs])
    
     # Hace medicion y grafica valores.
     ser.flushInput()
-    #ser.write(b'MVAL\n')      #Medicion de uno solo
-    ser.write(b'MVal\n')      #Medicion de 10 datos, antes era MVX10
 
+    # Se envía comando de mediciones (10 datos)
+    ser.write(b'MVal\n')
+    # Se reciben los datos
     recibe = ser.readline()
-    print(recibe)
+    print('S_MSG:',recibe)
     recibe = ser.readline()
     input_string = recibe
 
-    # Decode the bytes to a string and split it by commas
+    # Se decodifican los datos separados por comas
     values_str = input_string.decode('utf-8').split(',')
-    # Convert the string values to floating-point numbers
     values_float = [float(value) for value in values_str if value.strip()]
-    # Convert the list to a numpy array
     result_array = np.array(values_float)
 
-    # Obtiene valor maximo del array de resultados
+    # Obtiene valor maximo del arreglo de resultados
     intmaxsen = result_array.max()
     intminsen = result_array.min()
    
-    # Increase the width of the figure
-    fig, ax = plt.subplots(figsize=(6, 6))  # Adjust the width (12 inches in this example)    #12,6
+    # Ajuste de figura
+    fig, ax = plt.subplots(figsize=(6, 6))
 
     if (esopt == 3):
-        fig, ax = plt.subplots(figsize=(12, 6))  # Adjust the width (12 inches in this example)    #12,6
+        fig, ax = plt.subplots(figsize=(12, 6)) 
 
     ax.scatter(longs, result_array, color=colorbars, label=bar_labels)
     ax.set_ylabel('Intensidad')
     plt.yticks(fontsize=7)
 
     if (esopt == 1):
-        ax.set_title('Espectro Dispersion')
+        ax.set_title('Espectro de Dispersión')
         plt.xticks(fontsize=7)
 
     if (esopt == 2):
-        ax.set_title('Espectro Emision')
+        ax.set_title('Espectro de Emisión')
         plt.xticks(fontsize=7)
 
     if (esopt == 3):
         ax.set_title('Espectro')  
         plt.xticks(fontsize=10) 
 
-    limploty = int(tblim.get('1.0', tk.END))
     # Checa si es autolimite o no
     if (cheal_state.get() == True):
         limplotya = int(intmaxsen * 1.2)
@@ -183,14 +501,12 @@ def med_espect(esopt):
         if intmaxsen == 0:
             intmaxsen = 1
     
-    # Fija el limite de y 
+    # Fija el limite del eje y 
     ax.set_ylim(limplotyb, limplotya)
 
     # Para dibujarlo en la ventana del GUI
-    # Embed the Matplotlib plot in the Tkinter window
     canvas = FigureCanvasTkAgg(fig, master=root)
     canvas_widget = canvas.get_tk_widget()
-    #canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=1)
 
     if (esopt == 1):
         canvas_widget.place(x=0, y=40)
@@ -201,8 +517,7 @@ def med_espect(esopt):
     if (esopt == 3):
         canvas_widget.place(x=0, y=40)   
 
-    #root.plt.show()
-    print("otro")
+    print("T_MSG: otro")
     global DisResults
     global EmiResults
 
@@ -212,311 +527,7 @@ def med_espect(esopt):
     if (esopt == 2):
         EmiResults = result_array
 
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# Hace las dos graficas de una vez
-def grafDE(valoresD, valoresE):
-    # Tablas de longitudes de onda y etiquetas
-    longs = np.linspace(340, 850, 50)    #288
-    bar_labels = np.linspace(340, 850, 50)   #288
-    colorbars = np.array([wavelength_to_rgb(w) for w in longs])
-
-    # grafica valores.
-    # Hace un numpy array de los datos de dispersion
-    values_float = valoresD
-    result_arrayD = np.array(values_float)
-
-    # Obtiene valor maximo del array de resultados
-    intmaxsen = result_arrayD.max()
-    intminsen = result_arrayD.min()
-
-    # Increase the width of the figure
-    fig, ax = plt.subplots(figsize=(6, 6))  # Adjust the width (12 inches in this example)    #12,6
-    ax.scatter(longs, result_arrayD, color=colorbars, label=bar_labels)
-    ax.set_ylabel('Intensidad')
-    plt.yticks(fontsize=7)
-    ax.set_title('Espectro Dispersion')
-    plt.xticks(fontsize=7)
-    
-    limplotyb = int(intmaxsen * 1.2)
-    limplotya = 0                                      #int(intminsen*0.6)
-    ax.set_ylim(limplotya, limplotyb)
-
-    # Para dibujarlo en la ventana del GUI
-    canvas = FigureCanvasTkAgg(fig, master=root)
-    canvas_widget = canvas.get_tk_widget()
-    canvas_widget.place(x=0, y=40)       #Para dispersion poner en 600,40
-
-    # Hace un numpy array de los datos de emision
-    values_float = valoresE
-    result_arrayE = np.array(values_float)
-
-    # Obtiene valor maximo del array de resultados
-    intmaxsen = result_arrayE.max()
-
-    # Increase the width of the figure
-    fig, ax = plt.subplots(figsize=(6, 6))  # Adjust the width (12 inches in this example)    #12,6
-    ax.scatter(longs, result_arrayE, color=colorbars, label=bar_labels)
-    ax.set_ylabel('Intensidad')
-    plt.yticks(fontsize=7)
-    ax.set_title('Espectro Emision')
-    plt.xticks(fontsize=7)
-    
-    limplotyb = int(intmaxsen * 1.2)
-    limplotya = 0                                #int(intminsen*0.6)
-    ax.set_ylim(limplotya, limplotyb)
-
-    # Para dibujarlo en la ventana del GUI
-    canvas = FigureCanvasTkAgg(fig, master=root)
-    canvas_widget = canvas.get_tk_widget()
-    canvas_widget.place(x=600, y=40)       #Para dispersion poner en 600,40
-   
-    #root.plt.show()
-
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# //// GUARDA IMAGEN DE ESPECTROSCOPIA
-def guaIma():
-    inivenx = root.winfo_x()
-    iniveny = root.winfo_y() + 75
-    finvenx = int(inivenx + 1200)
-    finveny = int(iniveny + 600)
-    screenshot = ImageGrab.grab(bbox=(inivenx, iniveny, finvenx, finveny))
-    # Save the screenshot as an image
-    nombrearchivo = tbNombre.get("1.0", "end-1c") + '.png'
-    screenshot.save(nombrearchivo)
-
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-def guardado():
-    nombremed = tbNombre.get("1.0", "end-1c")
-    concmed = tbConc.get("1.0", "end-1c")
-
-    datosMed = [nombremed, concmed, "---"]
-    datosMed.extend(DisResults)
-    datosMed.extend("-")
-    datosMed.extend(EmiResults)
-
-    print(datosMed)
-    GuardaDato(datosMed)
-
-    # --- AÑADIDO ---
-    # 3. Rehabilita el botón cuando la medición termina.
-    print("Medición finalizada.")
-    botonDE.config(state="normal")
-    # (Opcional: podrías actualizar una etiqueta de "Midiendo..." a "Listo")
-
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# /// CICLO DE MEDICION DISPERSION Y EMISION
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# def MedDE():
-def _MedDE_execute():
-    global DisResults, EmiResults, is_measurement_busy
-    
-    try:
-        # Manda comando para medir Glifosato
-        ser.flushInput()
-        ser.write(b'SCAN\n')
-
-        # Primera linea es el acknoledge
-        recibe = ser.readline()
-        print(recibe)
-    
-        # La segunda linea son los valores de dispersion
-        recibe = ser.readline()
-        input_string = recibe
-        values_str = input_string.decode('utf-8').split(',')
-        values_float = [float(value) for value in values_str if value.strip()]
-        result_array = np.array(values_float)
-        DisResults = result_array
-        mediD = result_array
-
-        # La tercera linea son los valores de emision
-        recibe = ser.readline()
-        input_string = recibe
-        values_str = input_string.decode('utf-8').split(',')
-        values_float = [float(value) for value in values_str if value.strip()]
-        result_array = np.array(values_float)
-        EmiResults = result_array
-        mediE = result_array
-
-        # Grafica datos
-        grafDE(mediD, mediE)
-
-        # Guarda datos
-        guardado()
-
-        # Recibe resultado de medicion en instrumento
-        recibe = ser.readline()
-        print(recibe)
-        recibe = ser.readline()
-        print(recibe)
-        #recibe=ser.readline()
-        #print(recibe)
-
-    except Exception as e:
-        # Es una buena práctica registrar cualquier error
-        print(f"Error durante la medición MedDE: {e}")
-
-    finally:
-        # --- AÑADIDO ---
-        # 2. Libera el candado, sin importar si la medición
-        #    tuvo éxito o falló.
-        is_measurement_busy = False
-        
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# //// FUNCIONES DE BOTONES DE CONTROL (LEDs, Laser, Batería)
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# ... (justo después de VBAT_POLL_RATE_MS) ...
-# 1. Esta es la NUEVA función MedDE que tu botón llama.
-
-def MedDE():
-    # --- AÑADIDO ---
-    global is_measurement_busy 
-    # --- FIN ---
-
-    print("Iniciando retraso de 15 segundos...")
-    
-    # --- CORRECCIÓN ---
-    # 1. Poner el candado AHORA, al inicio del retraso.
-    is_measurement_busy = True 
-
-    # --- FIN ---
-    # --- AÑADIDO ---
-    # Deshabilita el botón "Medir D/E" para evitar clics múltiples
-    botonDE.config(state="disabled")
-    
-    # (Opcional: aquí podrías poner una etiqueta que diga "Midiendo en 15s...")
-
-    # Programa la ejecución de _MedDE_execute después de 15000 ms (15 seg)
-    root.after(15000, _MedDE_execute)
-
-
-def on_resize(event):
-    """Mantiene la proporción de la ventana cuando se redimensiona."""
-    
-    # Prevenir bucles de eventos si nuestra propia llamada a .geometry() dispara el evento
-    if (event.width, event.height) == root.last_set_size:
-        return
-
-    # Calcular la altura objetivo basada en el ancho actual
-    target_height = int(event.width / ASPECT_RATIO)
-    
-    # Calcular el ancho objetivo basado en la altura actual
-    target_width = int(event.height * ASPECT_RATIO)
-
-    # Decidir qué dimensión es la "limitante"
-    # Esto mantiene la ventana *dentro* del arrastre del mouse
-    if target_height > event.height:
-        # La altura es el factor limitante
-        final_width = target_width
-        final_height = event.height
-    else:
-        # El ancho es el factor limitante
-        final_width = event.width
-        final_height = target_height
-
-    # Guardar el tamaño que estamos a punto de establecer
-    root.last_set_size = (final_width, final_height)
-    root.geometry(f"{final_width}x{final_height}")
-
-def midvbat():
-    """Ejecuta una sola medición de batería y actualiza la GUI."""
-    if not ser.is_open:
-        labVbat.config(text="N/C") # No Conectado
-        print("Intento de medir VBAT sin conexión")
-        return
-
-    try:
-        ser.flushInput()
-        ser.write(b'MBAT\n')
-        
-        recibe_ack = ser.readline() # ACK
-        print(f"MBAT ACK: {recibe_ack}")
-        recibe_val = ser.readline() # Valor
-        print(f"MBAT RECV: {recibe_val}")
-
-        # Decodificar y limpiar el valor (ej. b'7.2\r\n' -> '7.2')
-        volt_str = recibe_val.decode('utf-8').strip()
-
-        if volt_str: # Asegurarse que no esté vacío
-            #labVbat.config(text=f"{volt_str} V") # <-- LÍNEA MODIFICADA
-            global EstVolt
-            EstVolt = float(volt_str)
-            print(f"Voltaje actualizado: {EstVolt} V")
-            if EstVolt<7.3:
-                print("Voltaje bajo, cargar bateria.")
-                bat_color = 'red'
-            else:
-                bat_color = 'green'
-            labVbat.config(text=f"{EstVolt:.2f} V", fg=bat_color)
-
-            
-        else:
-            labVbat.config(text="N/A") # No disponible
-    
-    except serial.SerialException as se:
-        print(f"Error de Serial en midvbat: {se}") #"Error de Serial en midvbat: {se}"
-        labVbat.config(text="E01")
-    except ValueError as ve:
-        print(f"Error de conversión de valor en midvbat: {ve} (recibido: {recibe_val})")#Error de conversión de valor en midvbat: {ve} (recibido: {recibe_val})"
-        labVbat.config(text="E02")
-    except Exception as e:
-        print(f"Error inesperado en midvbat: {e}")#"Error inesperado en midvbat: {e}"
-        labVbat.config(text="E03")
-
-def poll_vbat_loop():
-    """Función que se llama periódicamente para medir la batería."""
-    if ser.is_open and not is_measurement_busy: 
-        # --- FIN DE LA MODIFICACIÓN ---
-            midvbat()
-    
-    # Reprogramar la próxima ejecución
-    root.after(VBAT_POLL_RATE_MS, poll_vbat_loop)
-
-# //// PRENDE Y APAGA LUZ DIFUSA
-def DisLedOn():
-    ser.flushInput()
-    ser.write(b'DISLEDON\n')
-    recibe = ser.readline()
-    print(recibe)
-    labLEDStatus.config(text="ON", fg="green")
-    botLdon.config(state="disabled")
-    botLdoff.config(state="normal")
-
-def DisLedOff():
-    ser.flushInput()
-    ser.write(b'DISLEDOFF\n')
-    recibe = ser.readline()
-    print(recibe)
-    labLEDStatus.config(text="OFF", fg="red")
-    botLdoff.config(state="disabled")
-    botLdon.config(state="normal")
-
-# //// PRENDE Y APAGA LASER (750mA)
-def LasOn():
-    #labLaserStatus = tk.Label(root, text="OFF", fg='red')
-    ser.flushInput()
-    ser.write(b'LasOn\n')
-    recibe = ser.readline()
-    print(recibe)
-    labLaserStatus.config(text="ON", fg="green")
-    botLason.config(state="disabled")
-    botLasoff.config(state="normal")
-
-def LasOff():
-    ser.flushInput()
-    ser.write(b'LasOff\n')
-    recibe = ser.readline()
-    print(recibe)
-    labLaserStatus.config(text="OFF", fg="red")
-    botLasoff.config(state="disabled")
-    botLason.config(state="normal")
-
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-def alcerrar():
-    ser.close()
-    # Pone parametros en default
-    root.destroy()
-
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+# Esta función aún no se revisa
 def wavelength_to_rgb(wavelength):
     gamma = 0.8
     intensity_max = 255
@@ -565,9 +576,21 @@ def wavelength_to_rgb(wavelength):
 
     return (R / 255, G / 255, B / 255)  # Normalize RGB values to [0, 1]
 
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# ///  Diseño grafico del GUI
-# Ventana principal/////////////////////////////////////////////////////////////////////////////////////////////
+# Revisar esta funcion
+def guaIma():
+    # Función para guardar datos en una imagen
+    inivenx = root.winfo_x()
+    iniveny = root.winfo_y() + 75
+    finvenx = int(inivenx + 1200)
+    finveny = int(iniveny + 600)
+    screenshot = ImageGrab.grab(bbox=(inivenx, iniveny, finvenx, finveny))
+    # Save the screenshot as an image
+    nombrearchivo = tbNombre.get("1.0", "end-1c") + '.png'
+    screenshot.save(nombrearchivo)
+
+##################################################################################################
+
+# Diseño grafico del GUI
 # Abre ventana, para usarse como GUI
 root = tk.Tk()
 # Pone el nombre de la ventana
@@ -575,54 +598,23 @@ root.title("Control de equipo sensor Glifosato")
 # Ajusta el tamaño y lo deja fijo 
 root.geometry("1200x800")
 
-try:
-    # Check the operating system
-    if 'darwin' in sys.platform:
-        # MAC: Requires a .icns file
-        # Make sure 'my_icon.icns' is in the same folder
-        root.iconbitmap("icon.icns") 
-    else:
-        # WINDOWS: Requires a .ico file
-        root.iconbitmap("icon.ico")
-        
-except Exception as e:
-    print(f"No se pudo cargar el icono: {e}")
+# Etiquetas para status de conexión
+labConStatic = tk.Label(root, text="Status de conexión: ", fg="black") 
+labConStatic.place(x=465, y=8)
 
-# --- AÑADIR ESTAS LÍNEAS ---
-#
-#  Guardar el tamaño inicial para nuestra función de redimensión
-#root.last_set_size = (BASE_WIDTH, BASE_HEIGHT)
-# Vincular el evento de redimensión a nuestra función
-#root.bind("<Configure>", on_resize)
-# --- FIN DEL AÑADIDO ---
-
-# root.minsize(1200, 900) # set minimum window size value
-# root.maxsize(1200, 900) # set maximum window size value
-
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# Botones de Conexion, mediciones y guardado
-
-# --- AÑADIDO: Etiqueta de estado de conexión ---
-# Etiqueta 1: El texto estático que NO cambia de color
-labConStatic = tk.Label(root, text="Status de conexión:", fg="black") 
-labConStatic.place(x=470, y=8)
-
-# Etiqueta 2: El texto dinámico que SÍ cambia de color
 labConStatus = tk.Label(root, text="Sin conexión", fg="red")
 labConStatus.place(x=590, y=8) # 'x' está ajustado para que aparezca después de la etiqueta 1
-# --- FIN DEL AÑADIDO ---
-# 
-# # Botones de Conexion, mediciones y guardado
-# Declara boton
+
+# Botones de Conexion, mediciones y guardado
 botCon = tk.Button(root, text="Conectar", command=conectar)
 botCon.place(x=700, y=5)
 
-# Boton de hacer medicion dispersion, 
+# Boton para hacer medicion de dispersion, 
 botonDE = tk.Button(root, text="Medir D/E", command=MedDE)
 botonDE.place(x=20, y=650)
 botonDE.config(state="disable")
 
-# Boton de guardar emision, 
+# Boton para guardar emisión, 
 botonSaveSpec = tk.Button(root, text="Espectro", command=lambda: med_espect(3))
 botonSaveSpec.place(x=120, y=650)
 botonSaveSpec.config(state="disable")
@@ -632,7 +624,7 @@ botonSaveIm = tk.Button(root, text="Guardar Imagen", command=guaIma)
 botonSaveIm.place(x=220, y=650)
 botonSaveIm.config(state="disable")
 
-# Ajuste de tiempo de integracion
+# Caja para el tiempo de integracion
 tbati = tk.Text(root, height=1, width=4)
 tbati.insert(tk.END, "50")
 tbati.place(x=700, y=665)
@@ -648,10 +640,9 @@ botATI.config(state="disable")
 labati = tk.Label(root, text="Tiempo de integración: (1-250 ms)")#1-250 mS")
 labati.place(x=700, y=640)
 
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# Ventanas para meter datos de medicion
+# Cajas para meter datos de medicion
 # Nombre de la medicion
-labNombre = tk.Label(root, text="Nombre Medicion")
+labNombre = tk.Label(root, text="Nombre Medición")
 labNombre.place(x=20, y=720)
 tbNombre = tk.Text(root, height=1, width=14)
 tbNombre.place(x=20, y=740)
@@ -664,24 +655,22 @@ tbConc = tk.Text(root, height=1, width=8)
 tbConc.place(x=170, y=740)
 tbConc.insert(tk.END, "0.0")
 
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# Ajuste de limites? de graficacion en y
+# Ajuste de limites de graficacion en y
 cheal_state = tk.IntVar(value=1)
 cheal = tk.Checkbutton(root, text="Auto ajuste Y", variable=cheal_state)
-cheal.place(x=700, y=840)
+cheal.place(x=700, y=700)
 
 tblim = tk.Text(root, height=1, width=6)
 tblim.insert(tk.END, "300")
-tblim.place(x=800, y=845)
+tblim.place(x=800, y=700)
 
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# Mide Bateria
+# Boton para medir batería
 pos_x_boton = 960
-separacion_boton_etiqueta = 110 # <-- ¡Ajusta esta 'distancia' como quieras!
+separacion_boton_etiqueta = 110
 
 botVbat = tk.Button(root, text="Medir", command=midvbat)
 botVbat.place(x=pos_x_boton+50, y=658)
-botVbat.config(state="disabled") # <-- AÑADIR ESTA LÍNEA
+botVbat.config(state="disabled") 
 
 labVbat = tk.Label(root, text="Nivel de batería:")
 labVbat.place(x=pos_x_boton, y=630+10)
@@ -689,8 +678,7 @@ labVbat.place(x=pos_x_boton, y=630+10)
 labVbat = tk.Label(root, text="-----")
 labVbat.place(x=pos_x_boton, y=663)
 
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# PRENDE/APAGA LUZ DIFUSA
+# Botones para control del LED
 labLED = tk.Label(root, text="Control del LED:")
 labLED.place(x=450, y=630+10)
 labLEDStatus = tk.Label(root, text="OFF", fg='red')
@@ -701,11 +689,10 @@ botLdon.place(x=450, y=650+10)
 
 botLdoff = tk.Button(root, text="LED Off", command=DisLedOff)
 botLdoff.place(x=530, y=650+10)
-botLdoff.config(state="disabled") # <-- AÑADIR ESTA LÍNEA
+botLdoff.config(state="disabled")
 botLdon.config(state="disabled")
 
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-# PRENDE/APAGA LASER
+# Botones para control del laser
 labLaser = tk.Label(root, text="Control del laser:")
 labLaser.place(x=450, y=680+10)
 labLaserStatus = tk.Label(root, text="OFF", fg='red')
@@ -719,27 +706,21 @@ botLasoff.place(x=540, y=700+10)
 botLasoff.config(state="disabled") # <-- AÑADIR ESTA LÍNEA
 botLason.config(state="disabled")
 
-
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 # Desplienga en la GUI logos: UNAM, CFATA Y CONACYT
 # Carga las imagenes
 orimage1 = Image.open("LogoCFATA.png")  
-width, height = 120, 60  # Set the desired width and height for the resized image
+width, height = 120, 60
 image1 = orimage1.resize((width, height))
 photo1 = ImageTk.PhotoImage(image1)
 portalogo1 = tk.Label(root, image=photo1)
 portalogo1.place(x=900, y=800-80)
 
 orimage2 = Image.open("secihti_logo.jpg")  
-width, height = 150, 60  # Set the desired width and height for the resized image
+width, height = 150, 60 
 image2 = orimage2.resize((width, height))
 photo2 = ImageTk.PhotoImage(image2)
 portalogo2 = tk.Label(root, image=photo2)
 portalogo2.place(x=900+125, y=800-80)
-
-# Pone en pantalla relacion de intensidades
-#labRatio=tk.Label(root,text="560/645")
-#labRatio.place(x=460,y=830)
 
 # Cuando se cierra la ventana se corre una rutina
 root.protocol("WM_DELETE_WINDOW", alcerrar)

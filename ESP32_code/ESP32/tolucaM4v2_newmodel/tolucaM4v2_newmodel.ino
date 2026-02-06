@@ -17,9 +17,9 @@
   */
 
 #include <WiFi.h>         //para deshabilitar el wifi
-
-#include "glifoNN1.h"     //Red neuronal
 #include "spectrometer.h"   //Rutina de lectura de espectro
+#include "Use_Scaler.h" // scaler (nuevo)
+#include "Use_Model.h" // modelo actualizado
 
 
 //********************************************************************************************************
@@ -44,13 +44,13 @@ String device_name = "MILPA_003";
 BluetoothSerial SerialBT;
 
 //**********************************************************************************************************
-
-float input[100];     
+// Added buffer for scaled data ---
+float input[100];          // Buffer for RAW sensor data
+float input_scaled[100];   // Buffer for SCALED data (to be fed into NN)   
 
 float acur1;
 float acur2;
 float ratio;
-
 //*****************************************************************
 
 //Define pines de entrada salida
@@ -61,7 +61,7 @@ int CuuS;
 int Led=2;  //led de la tarjeta incluido
 int led_state = LOW;    // estado actual del led
 int LedExt=17;  //Led de indicacion, fuera de la caja
-int LedDis=18;  //Led para dispersion de luz blanca    //ANTES18
+int LedDis=22;  //Led para dispersion de luz blanca    //ANTES18
 int AnaIn=26;   //Entrada analogica para medir carga de bateria
 
 //Para control del espectrofotometro Hamamatsu
@@ -157,14 +157,18 @@ void setup()
       }
 
     
-    //Inicia red neuronal 1
-      while (!glifoNN1.begin()) {
-        Serial.print("Error in NN initialization: ");
-        Serial.println(glifoNN1.getErrorMessage());
-      }
+// --- CHANGED: Initialize the NEW model instance ---
+  // The instance name 'gly_model' comes from the "instance_name" parameter in Python
+  while (!gly_model.begin()) {
+    Serial.print("Error en inicialización de la red neuronal: ");
+    Serial.println(gly_model.getErrorMessage());
+    // Flash LED to indicate error
+    digitalWrite(LedExt, HIGH); delay(100); digitalWrite(LedExt, LOW); delay(100);
+  }
+  Serial.println("Red neuronal inicializada.");
     
 
-    digitalWrite(LedExt,LOW);
+  digitalWrite(LedExt,LOW);
 
 
   //Mensaje inicial
@@ -301,8 +305,13 @@ void loop()
     vbat=analogRead(26);
     vbat=vbat*0.01061;
    
-    //Hace inferencia
-    float medicion1 = glifoNN1.predict(input);
+// --- CHANGED: APPLY SCALER AND PREDICT ---
+    // A. Apply RobustScaler (Raw -> Scaled)
+    // input is the source, input_scaled is the destination
+    apply_scaler(input, input_scaled);
+
+    // B. Predict using the scaled data
+    float medicion1 = gly_model.predict(input_scaled);
   
     Serial.println(vbat);
     
